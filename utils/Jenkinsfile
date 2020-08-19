@@ -1,0 +1,99 @@
+pipeline {
+    agent {
+		label 'microservices'
+	}
+	environment {
+        BUILD_VERSION = readMavenPom().getVersion()
+    }
+    tools {
+        maven 'Maven'
+        jdk 'Java8'
+    }
+    stages {
+        stage ('Compile') {
+            steps {
+               echo 'Compiling branch ' + env.BRANCH_NAME
+               sh 'mvn clean compile -DjvmArgs="file.encoding=UTF8"'
+            }
+        }
+	
+		stage ('Code analysis') {
+			steps {
+			   echo 'Code Analysis for branch ' + env.BRANCH_NAME
+			   sh 'mvn findbugs:findbugs checkstyle:checkstyle'
+			}
+		}
+
+		stage ('Test') {
+			steps {
+				echo 'Test execution for branch ' + env.BRANCH_NAME
+				sh 'mvn -DskipTests=${skipTests} test' 
+			}
+		}
+		
+		stage ('SQ Code analysis & Test Coverage') {
+			when {
+    			expression {
+        			return env.CHANGE_TARGET == 'master' || env.BRANCH_NAME == 'master'
+        		}
+    		}
+			steps {
+			    echo 'Sonar cube analysis for branch ' + env.BRANCH_NAME + env.CHANGE_BRANCH + env.CHANGE_ID
+				withSonarQubeEnv('Sonarqube') {
+					script {
+	                    if (env.BRANCH_NAME == 'master') {
+	                    	sh 'mvn org.sonarsource.scanner.maven:sonar-maven-plugin:3.6.1.1688:sonar -Dsonar.branch.name='+env.BRANCH_NAME+ ' -Dsonar.projectVersion=' + BUILD_VERSION
+	                    } else {
+	                    	sh 'mvn org.sonarsource.scanner.maven:sonar-maven-plugin:3.6.1.1688:sonar -Dsonar.pullrequest.branch='+env.CHANGE_BRANCH+ ' -Dsonar.pullrequest.base='+ env.CHANGE_TARGET+' -Dsonar.pullrequest.key='+env.CHANGE_ID+ ' -Dsonar.projectVersion=' + BUILD_VERSION
+	                    }
+	                }				  
+				}
+			}
+		}
+		
+		stage('SQ Quality Gate') {
+			
+			  when {
+	    			expression {
+	        			return env.CHANGE_TARGET == 'master' || env.BRANCH_NAME == 'master'
+	        		}
+	    	  }
+			  steps {
+			  	  script {
+						    echo 'SQ Quality Gate for branch ' + env.BRANCH_NAME
+							timeout(time: 1, unit: 'HOURS') {
+							  waitForQualityGate abortPipeline: true
+							}
+					  
+	        	  }		  
+			  } 
+		}
+			
+		stage ('Deploy to Artifactory') {
+				
+  				when {
+	    			expression {
+	        			return env.BRANCH_NAME == 'master' || env.BRANCH_NAME ==~ /release.*/
+	        		}
+	    	  	}
+				steps {
+					script {
+						if (env.BRANCH_NAME == 'master') {
+							echo 'Deploy to Artifactory for branch ' + env.BRANCH_NAME + ' snapshot '+ BUILD_VERSION
+			                sh 'mvn deploy -Dfindbugs.skip -Dpmd.skip=true'
+			            } else {
+	                    	echo 'Deploy to Artifactory for branch ' + env.BRANCH_NAME + ' release '+ BUILD_VERSION
+			                sh 'mvn deploy -Dfindbugs.skip -Dpmd.skip=true -P release'
+	                    }
+			        }
+				}
+			}
+		}
+	
+	post {
+		always {
+            deleteDir() /* clean up our workspace */
+        }
+	}
+}
+
